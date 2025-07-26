@@ -167,6 +167,8 @@ def test_transformer_block(numpy_snapshot, ts_state_dict, in_embeddings, d_model
         weights=block_weights,
         in_features=in_embeddings,
     )
+    print('----------------')
+    print(actual_output.dtype)
     numpy_snapshot.assert_match(
         actual_output,
         atol=1e-6,

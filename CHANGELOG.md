@@ -8,6 +8,8 @@ All changes we make to the assignment code or PDF will be documented in this fil
 - handout: Fix RoPE indexing
 - code: Fix test for truncated LM inputs
 - code: Ruff reformatting and linting
+- code: Simplify snapshot testing
+- code: Make everything compatible with `ty` typing
 
 ## [1.0.4] - 2025-04-08
 ### Added

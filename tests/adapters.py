@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import concurrent.futures
+import heapq
+import itertools
+import multiprocessing
 import os
-from typing import IO, Any, BinaryIO
+from collections import defaultdict
+import time
+from typing import Generator, Iterator, TypeVar, Generic, Any, BinaryIO, IO
 from collections.abc import Iterable
-from jaxtyping import Float, Int
-
 import numpy.typing as npt
-import torch
-from torch import Tensor
+import numpy as np
 
+from dev.dataloader import get_batch
+from dev.layers import Linear, Embedding, RMS, SwiGlu, RoPE, softmax, Attn, Block, TransformerLm
+from jaxtyping import Float, Int
+from torch import Tensor
+import torch
+import regex as re
+import pickle
+from einops import rearrange, einsum
+
+from dev.tokenizer import Tokenizer
+from dev.training import cross_entropy_loss, AdamW, lr_cosine_schedule, gradient_clip, save_checkpoint, load_checkpoint
 
 
 def run_linear(
@@ -29,8 +43,11 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    lin = Linear(d_in, d_out, device=weights.device, dtype=weights.dtype)
+    with torch.no_grad():
+        lin.weight.copy_(weights)
+    return lin(in_features)
 
-    raise NotImplementedError
 
 
 def run_embedding(
@@ -52,7 +69,10 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    embedding = Embedding(vocab_size, d_model, device=weights.device, dtype=weights.dtype)
+    with torch.no_grad():
+        embedding.weight.copy_(weights)
+    return embedding(token_ids)
 
 
 def run_swiglu(
@@ -80,11 +100,12 @@ def run_swiglu(
     # Example:
     # If your state dict keys match, you can use `load_state_dict()`
     # swiglu.load_state_dict(weights)
-    # You can also manually assign the weights
-    # swiglu.w1.weight.data = w1_weight
-    # swiglu.w2.weight.data = w2_weight
-    # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    swiglu = SwiGlu(d_model, d_ff, device=w1_weight.device, dtype=w1_weight.dtype)
+    with torch.no_grad():
+        swiglu.w1.weight.copy_(w1_weight)
+        swiglu.w2.weight.copy_(w2_weight)
+        swiglu.w3.weight.copy_(w3_weight)
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -139,8 +160,11 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
-
+    attn = Attn(d_model=d_model, num_heads=num_heads, max_seq_len=in_features.shape[-2])
+    with torch.no_grad():
+        attn.W_qkv.weight.copy_(torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0))
+        attn.o_proj_weight.weight.copy_(o_proj_weight)
+    return attn(in_features)
 
 def run_multihead_self_attention_with_rope(
     d_model: int,
@@ -179,7 +203,11 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    attn = Attn(d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, theta=theta)
+    with torch.no_grad():
+        attn.W_qkv.weight.copy_(torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0))
+        attn.output_proj.weight.copy_(o_proj_weight)
+    return attn(in_features, token_positions=token_positions)
 
 
 def run_rope(
@@ -201,8 +229,38 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    rope = RoPE(theta=theta, d_k=d_k, max_seq_len=max_seq_len, device=in_query_or_key.device)
+    return rope(in_query_or_key, token_positions)
 
+def _merge_attention_weights(weights: dict[str, Tensor]) -> dict[str, Tensor]:
+    if "attn.q_proj.weight" in weights:
+        weights["attn.W_qkv.weight"] = torch.cat(
+            [weights["attn.q_proj.weight"], weights["attn.k_proj.weight"], weights["attn.v_proj.weight"]], dim=0
+        )
+
+        del weights["attn.q_proj.weight"]
+        del weights["attn.k_proj.weight"]
+        del weights["attn.v_proj.weight"]
+
+    layer_prefixes = set()
+    for key in list(weights.keys()):
+        if key.startswith("layers.") and key.endswith(".attn.q_proj.weight"):
+            layer_prefix = key.rsplit(".attn.q_proj.weight", 1)[0]
+            layer_prefixes.add(layer_prefix)
+
+    for prefix in layer_prefixes:
+        q_key = f"{prefix}.attn.q_proj.weight"
+        k_key = f"{prefix}.attn.k_proj.weight"
+        v_key = f"{prefix}.attn.v_proj.weight"
+
+        if q_key in weights and k_key in weights and v_key in weights:
+            weights[f"{prefix}.attn.W_qkv.weight"] = torch.cat([weights[q_key], weights[k_key], weights[v_key]], dim=0)
+
+            del weights[q_key]
+            del weights[k_key]
+            del weights[v_key]
+
+    return weights
 
 def run_transformer_block(
     d_model: int,
@@ -274,8 +332,9 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
-
+    block = Block(d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=max_seq_len, theta=theta)
+    block.load_state_dict(_merge_attention_weights(weights))
+    return block(in_features)
 
 def run_transformer_lm(
     vocab_size: int,
@@ -356,7 +415,10 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    lm = TransformerLm(vocab_size=vocab_size, d_model=d_model,num_heads=num_heads,
+                  d_ff=d_ff,max_seq_len=context_length,theta=rope_theta, num_layers=num_layers)
+    lm.load_state_dict(_merge_attention_weights(weights))
+    return lm(in_indices)
 
 
 def run_rmsnorm(
@@ -379,7 +441,10 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rms = RMS(d_model, eps, device=weights.device, dtype=weights.dtype)
+    with torch.no_grad():
+        rms.weight.copy_(weights)
+    return rms(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -416,7 +481,7 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    return get_batch(dataset, batch_size, context_length, device)
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -432,7 +497,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    return softmax(in_features, dim)
 
 
 def run_cross_entropy(
@@ -450,7 +515,7 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    return cross_entropy_loss(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -462,14 +527,14 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    return gradient_clip(parameters, max_l2_norm)
 
 
-def get_adamw_cls() -> type[torch.optim.Optimizer]:
+def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -497,7 +562,9 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    return lr_cosine_schedule(
+        it, max_learning_rate, min_learning_rate, warmup_iters, cosine_cycle_iters
+    )
 
 
 def run_save_checkpoint(
@@ -516,7 +583,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    return save_checkpoint(model, optimizer, iteration, out)
 
 
 def run_load_checkpoint(
@@ -537,14 +604,26 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    return load_checkpoint(src, model, optimizer)
+
+T = TypeVar('T')
+class MaxHeapNode(Generic[T]):
+    def __init__(self, key: T):
+        self.key = key
+
+    def __lt__(self, other: MaxHeapNode[T]):
+        # Invert the comparison logic to simulate a max-heap
+        return self.key > other.key
+
+PAT_regex = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+UTF8 = 'utf-8'
 
 
 def get_tokenizer(
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
     special_tokens: list[str] | None = None,
-) -> Any:
+) -> Tokenizer:
     """Given a vocabulary, a list of merges, and a list of special tokens,
     return a BPE tokenizer that uses the provided vocab, merges, and special tokens.
 
@@ -560,7 +639,131 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens if special_tokens else [])
+
+def count_words_in_chunk(lines: list[str]) -> dict[tuple[bytes], int]:
+    # 2. each process remove special token and start counting.
+    # 3. then each process hash its key and return [{key hash =0}, {key hash =1}] to master
+    st_time = time.time()
+    print('MP start time', st_time)
+    counter = defaultdict(int)
+    for line in lines:
+        for word in PAT_regex.findall(line):
+        # for word in line.split(' '):
+            counter[tuple([bytes([b]) for b in word.encode(UTF8)])]+=1
+    print('pretoken time: ', time.time()-st_time)
+    print('processing size: ', sum([len(k)*v for k,v in counter.items()]))
+    return counter
+
+def compute_pair_count(word_count: dict[tuple[bytes], int]) -> \
+        (dict[tuple[bytes, bytes], int], dict[tuple[bytes, bytes], set[tuple[bytes, ...]]]):
+    bpe_count = defaultdict(int)
+    pair_to_word = defaultdict(lambda:set())
+    for word, count in word_count.items():
+        for b1, b2 in zip(word[:-1], word[1:]):
+            bpe_count[(b1, b2)]+=count
+            pair_to_word[(b1, b2)].add(word)
+    return bpe_count, pair_to_word
+
+def compute_top_pair(bpe_count: dict[tuple[bytes, bytes], int], pq: list[MaxHeapNode[tuple[int, tuple[bytes, bytes]]]])-> tuple[bytes, bytes] | None:
+    top_count, top_pair = pq[0].key
+    while bpe_count[top_pair] != top_count:
+        heapq.heappop(pq)
+        heapq.heappush(pq, MaxHeapNode((bpe_count[top_pair], top_pair)))
+        top_count, top_pair = pq[0].key
+    return top_pair
+
+def merge_bpe(word_count: dict[tuple[bytes, ...], int],
+              pair_count: dict[tuple[bytes, bytes], int],
+              pair_to_words: dict[tuple[bytes, bytes], set[tuple[bytes,...]]],
+              b1:bytes, b2:bytes,
+              pq: list[MaxHeapNode[tuple[int, tuple[bytes, bytes]]]])-> dict[tuple[bytes, ...], int]:
+    assert (b1, b2) == pq[0].key[1]
+    del pair_count[(b1,b2)]
+    heapq.heappop(pq)
+    new_pairs = defaultdict(int)
+    word_update = {}
+    for word in pair_to_words[(b1,b2)]:
+        count  = word_count[word]
+        # print('merging:', word, count, b1, b2)
+        i=0
+        # merge the word
+        merge_indices = []
+        while i<len(word)-1:
+            if word[i]==b1 and word[i+1] == b2:
+                merge_indices.append(i)
+                i+=2
+            else:
+                i+=1
+        if not merge_indices:
+            continue
+        new_word: list[bytes] = list(word[:merge_indices[0]])
+        for merge_idx, next_merge_idx in zip(merge_indices[:-1], merge_indices[1:]):
+            new_word.append(word[merge_idx]+word[merge_idx+1])
+            new_word.extend(word[merge_idx+2:next_merge_idx])
+        new_word.append(word[merge_indices[-1]] + word[merge_indices[-1] + 1])
+        new_word.extend(word[merge_indices[-1]+2:])
+        new_word: tuple[bytes, ...] = tuple(new_word)
+        word_update[word] = new_word
+        del word_count[word]
+        word_count[new_word] = count
+        for merge_idx in merge_indices:
+            # x b1 (cur) b2 y
+            if merge_idx>0:
+                pair_count[(word[merge_idx-1], b1)]-=count
+            if merge_idx<len(word)-2:
+                pair_count[(b2, word[merge_idx+2])]-=count
+        new_word_merge_indices = [a-b for a,b in zip(merge_indices, range(len(merge_indices)))]
+        for new_merge_index in new_word_merge_indices:
+            if new_merge_index>0:
+                pair_count[(new_word[new_merge_index-1], b1+b2)] +=count
+                new_pairs[(new_word[new_merge_index-1], b1+b2)] +=count
+            if new_merge_index<len(new_word)-1:
+                pair_count[(b1+b2, new_word[new_merge_index+1])] +=count
+                new_pairs[(b1+b2, new_word[new_merge_index+1])] +=count
+    for word, new_word in word_update.items():
+        for p1, p2 in zip(word[:-1], word[1:]):
+            pair_to_words[(p1, p2)].discard(word)
+        for p1, p2 in zip(new_word[:-1], new_word[1:]):
+            pair_to_words[(p1, p2)].add(new_word)
+    for new_pair, new_pair_count in new_pairs.items():
+        heapq.heappush(pq, MaxHeapNode((new_pair_count, new_pair)))
+    return word_count
+
+def find_first(chunk:str, special_tokens:list[str], offset:int)->tuple[int, int]:
+    idx = len(chunk)
+    first_token = ''
+    for token in special_tokens:
+        first = chunk.find(token, offset)
+        if first!=-1 and first < idx:
+            idx = first
+            first_token = token
+    return idx, idx+len(first_token)
+
+def split_by_special_tokens(chunk:str, special_tokens:list[str])->list[str]:
+    ans = []
+    cur = 0
+    while cur<len(chunk):
+        st, ed = find_first(chunk, special_tokens, cur)
+        ans.append(chunk[cur:st])
+        cur = ed
+    return ans
+
+# read file, generate lines seperated by special tokens
+def read_file_in_chunk(input_path: str | os.PathLike, special_tokens:list[str])-> Generator[list[str]]:
+    with open(input_path, 'r', encoding=UTF8) as f:
+        chunk_size = 1_000_000
+        chunk = f.read(chunk_size)
+        read_size = len(chunk)
+        while chunk:
+            lines = split_by_special_tokens(chunk, special_tokens)
+            if read_size == 0: # last chunk
+                chunk=''
+                yield lines
+            else:
+                yield lines[:-1]
+                chunk = f'{lines[-1]}{f.read(chunk_size)}'
+                read_size = len(chunk) - len(lines[-1])
 
 
 def run_train_bpe(
@@ -590,4 +793,72 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    # master: chunk the doc and shuffle
+    num_processes = multiprocessing.cpu_count() -1
+    # num_processes=1
+    file_size = os.path.getsize(input_path)
+    if file_size<1_000_000:
+        st_time = time.time()
+        text = []
+        for lines in read_file_in_chunk(input_path, special_tokens):
+            text.extend(lines)
+        word_count = count_words_in_chunk(text)
+    else:
+        chunk_size = min(file_size // num_processes + 1, 100*1_000_000)
+        word_count = defaultdict(int)
+        # 1. each process handles a chunk in a streaming manner
+        st_time = time.time()
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
+            results_iterator = executor.map(count_words_in_chunk, read_file_in_chunk(input_path, special_tokens))
+            for result in results_iterator:
+                if len(word_count)==0:
+                    word_count=result
+                else:
+                    for k,v in result.items():
+                        word_count[k]+=v
+        print('pretoken time:', time.time()-st_time)
+        print('total size from word count: ', sum([len(k)*v for k,v in word_count.items()]))
+    # print(word_count)
+    # 2. child process get pair frequency (note: key is of the same hash, but its bytes are not)
+    vocab = [token.encode(UTF8) for token in special_tokens] + [bytes([b]) for b in (range(256))]
+    merges = []
+    pair_count, pair_to_word = compute_pair_count(word_count)
+
+    pq = [MaxHeapNode((v,k)) for k,v in pair_count.items()]
+    heapq.heapify(pq)
+    while len(vocab)<vocab_size:
+        st_time = time.time()
+        top_pair = compute_top_pair(pair_count, pq)
+        if top_pair is None:
+            break
+        b1, b2 = top_pair
+        word_count = merge_bpe(word_count, pair_count, pair_to_word, b1, b2, pq)
+        vocab.append(b1+b2)
+        merges.append((b1, b2))
+    return {i:item for i,item in enumerate(vocab)}, merges
+
+def iter_file_chunks(path: str, chunk_size: int = 10 * 1024 * 1024) -> Iterator[str]:
+    """Yield fixed-size text chunks with Windows line endings normalized to '\n'."""
+    with open(path, 'r', encoding='utf-8', newline='') as f:
+        for chunk in iter(lambda: f.read(chunk_size), ""):  # sentinel is empty string now
+            yield chunk
+
+def tokenize_to_file(tokenizer_path:str, corpus_path:str, output_file:str):
+    print(f'using {tokenizer_path} to tokenize {corpus_path}')
+    st_time = time.time()
+    with open(tokenizer_path, 'rb') as f:
+        vocab, merges = pickle.load(f)
+        tokenizer = get_tokenizer(vocab, merges)
+        tokens = tokenizer.encode_iterable(iter_file_chunks(corpus_path))
+        with open(output_file, 'wb') as output:
+            chunk = list(itertools.islice(tokens, 1_000_000))
+            while chunk:
+                np.asarray(chunk, dtype=np.uint16).tofile(output)
+                print('writing 1MB: ', chunk[:10])
+                chunk = list(itertools.islice(tokens, 1_000_000))
+    print(f'using time {(time.time()-st_time)/60}')
+
+# poetry env activate
+if __name__=="__main__":
+    tokenize_to_file('owt_tokenizer.pkl', 'data/TinyStoriesV2-GPT4-train.txt', 'ts_train_owt_tokenized')
+    tokenize_to_file('owt_tokenizer.pkl', 'data/TinyStoriesV2-GPT4-valid.txt', 'ts_valid_owt_tokenized')

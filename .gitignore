@@ -161,3 +161,10 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+
+/shelf/
+/workspace.xml
+/data/
+**/.idea/
+**/*.pkl
+profile*

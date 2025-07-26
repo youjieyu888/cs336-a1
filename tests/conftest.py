@@ -8,6 +8,9 @@ from torch import Tensor
 import pickle
 
 
+class DEFAULT:
+    pass
+
 
 _A = TypeVar("_A", np.ndarray, Tensor)
 
@@ -24,9 +27,15 @@ class NumpySnapshot:
     def __init__(
         self,
         snapshot_dir: str = "tests/_snapshots",
+        default_force_update: bool = False,
+        always_match_exact: bool = False,
+        default_test_name: str | None = None,
     ):
         self.snapshot_dir = Path(snapshot_dir)
         os.makedirs(self.snapshot_dir, exist_ok=True)
+        self.default_force_update = default_force_update
+        self.always_match_exact = always_match_exact
+        self.default_test_name = default_test_name
 
     def _get_snapshot_path(self, test_name: str) -> Path:
         """Get the path to the snapshot file."""
@@ -35,10 +44,10 @@ class NumpySnapshot:
     def assert_match(
         self,
         actual: _A | dict[str, _A],
-        test_name: str,
-        force_update: bool = False,
         rtol: float = 1e-4,
         atol: float = 1e-2,
+        test_name: str | type[DEFAULT] = DEFAULT,
+        force_update: bool | type[DEFAULT] = DEFAULT,
     ):
         """
         Assert that the actual array(s) matches the snapshot.
@@ -48,12 +57,19 @@ class NumpySnapshot:
             test_name: The name of the test (used for the snapshot file)
             update: If True, update the snapshot instead of comparing
         """
+        if force_update is DEFAULT:
+            force_update = self.default_force_update
+        if self.always_match_exact:
+            rtol = atol = 0
+        if test_name is DEFAULT:
+            assert self.default_test_name is not None, "Test name must be provided or set as default"
+            test_name = self.default_test_name
+
         snapshot_path = self._get_snapshot_path(test_name)
 
         # Convert single array to dictionary for consistent handling
         arrays_dict = actual if isinstance(actual, dict) else {"array": actual}
         arrays_dict = {k: _canonicalize_array(v) for k, v in arrays_dict.items()}
-
 
         # Load the snapshot
         expected_arrays = dict(np.load(snapshot_path))
@@ -67,7 +83,7 @@ class NumpySnapshot:
         extra_keys = set(expected_arrays.keys()) - set(arrays_dict.keys())
         if extra_keys:
             raise AssertionError(f"Snapshot contains extra keys {extra_keys} for {test_name}")
-
+        print(expected_arrays['array'].dtype)
         # Compare all arrays
         for key in arrays_dict:
             np.testing.assert_allclose(
@@ -80,12 +96,19 @@ class NumpySnapshot:
 
 
 class Snapshot:
-    def __init__(self, snapshot_dir: str = "tests/_snapshots"):
+    def __init__(
+        self,
+        snapshot_dir: str = "tests/_snapshots",
+        default_force_update: bool = False,
+        default_test_name: str | None = None,
+    ):
         """
         Snapshot for arbitrary data types, saved as pickle files.
         """
         self.snapshot_dir = Path(snapshot_dir)
         os.makedirs(self.snapshot_dir, exist_ok=True)
+        self.default_force_update = default_force_update
+        self.default_test_name = default_test_name
 
     def _get_snapshot_path(self, test_name: str) -> Path:
         return self.snapshot_dir / f"{test_name}.pkl"
@@ -93,8 +116,8 @@ class Snapshot:
     def assert_match(
         self,
         actual: _A | dict[str, _A],
-        test_name: str,
-        force_update: bool = False,
+        test_name: str | type[DEFAULT] = DEFAULT,
+        force_update: bool | type[DEFAULT] = DEFAULT,
     ):
         """
         Assert that the actual data matches the snapshot.
@@ -104,8 +127,13 @@ class Snapshot:
             force_update: If True, update the snapshot instead of comparing
         """
 
-        snapshot_path = self._get_snapshot_path(test_name)
+        if force_update is DEFAULT:
+            force_update = self.default_force_update
+        if test_name is DEFAULT:
+            assert self.default_test_name is not None, "Test name must be provided or set as default"
+            test_name = self.default_test_name
 
+        snapshot_path = self._get_snapshot_path(test_name)
 
         # Load the snapshot
         with open(snapshot_path, "rb") as f:
@@ -135,18 +163,7 @@ def snapshot(request):
     force_update = False
 
     # Create the snapshot handler with default settings
-    snapshot_handler = Snapshot()
-
-    # Patch the assert_match method to include the update flag by default
-    original_assert_match = snapshot_handler.assert_match
-
-    def patched_assert_match(actual, test_name=None, force_update=force_update):
-        # If test_name is not provided, use the test function name
-        if test_name is None:
-            test_name = request.node.name
-        return original_assert_match(actual, test_name=test_name, force_update=force_update)
-
-    snapshot_handler.assert_match = patched_assert_match
+    snapshot_handler = Snapshot(default_force_update=force_update, default_test_name=request.node.name)
 
     return snapshot_handler
 
@@ -167,20 +184,9 @@ def numpy_snapshot(request):
     match_exact = request.config.getoption("--snapshot-exact", default=False)
 
     # Create the snapshot handler with default settings
-    snapshot = NumpySnapshot()
-
-    # Patch the assert_match method to include the update flag by default
-    original_assert_match = snapshot.assert_match
-
-    def patched_assert_match(actual, test_name=None, force_update=force_update, rtol=1e-4, atol=1e-2):
-        # If test_name is not provided, use the test function name
-        if test_name is None:
-            test_name = request.node.name
-        if match_exact:
-            rtol = atol = 0
-        return original_assert_match(actual, test_name=test_name, force_update=force_update, rtol=rtol, atol=atol)
-
-    snapshot.assert_match = patched_assert_match
+    snapshot = NumpySnapshot(
+        default_force_update=force_update, always_match_exact=match_exact, default_test_name=request.node.name
+    )
 
     return snapshot
 

@@ -21,6 +21,7 @@ def test_train_bpe_speed():
         special_tokens=["<|endoftext|>"],
     )
     end_time = time.time()
+    print(end_time - start_time)
     assert end_time - start_time < 1.5
 
 
@@ -81,8 +82,8 @@ def test_train_bpe_special_tokens(snapshot):
 
     snapshot.assert_match(
         {
+            "merges": merges,
             "vocab_keys": set(vocab.keys()),
             "vocab_values": set(vocab.values()),
-            "merges": merges,
         },
     )

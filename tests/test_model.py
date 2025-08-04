@@ -19,7 +19,7 @@ from .adapters import (
 
 
 def test_linear(numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff):
-    w1_weight = ts_state_dict[0]["blocks.0.ffn.w1.weight"]
+    w1_weight = ts_state_dict[0]["layers.0.ffn.w1.weight"]
     output = run_linear(
         d_in=d_model,
         d_out=d_ff,
@@ -41,7 +41,7 @@ def test_embedding(numpy_snapshot, ts_state_dict, in_indices, vocab_size, d_mode
 
 
 def test_swiglu(numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff):
-    w1_weight, w2_weight, w3_weight = [ts_state_dict[0][f"blocks.0.ffn.{k}.weight"] for k in ["w1", "w2", "w3"]]
+    w1_weight, w2_weight, w3_weight = [ts_state_dict[0][f"layers.0.ffn.{k}.weight"] for k in ["w1", "w2", "w3"]]
 
     actual_output = run_swiglu(
         d_model=d_model,
@@ -77,7 +77,7 @@ def test_4d_scaled_dot_product_attention(numpy_snapshot, q, k, v, mask):
 def test_multihead_self_attention(numpy_snapshot, in_embeddings, d_model, n_heads, ts_state_dict):
     d, _ = ts_state_dict
     q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
-        d[f"blocks.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
+        d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
     ]
     actual_output = run_multihead_self_attention(
         d_model=d_model,
@@ -96,7 +96,7 @@ def test_multihead_self_attention_with_rope(
 ):
     d, _ = ts_state_dict
     q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
-        d[f"blocks.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
+        d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
     ]
     pos_ids = rearrange(pos_ids, "seq -> 1 seq")
     actual_output = run_multihead_self_attention_with_rope(
@@ -156,7 +156,7 @@ def test_transformer_lm_truncated_input(
 
 
 def test_transformer_block(numpy_snapshot, ts_state_dict, in_embeddings, d_model, n_heads, d_ff, n_keys, theta):
-    block_weights = {k.replace("blocks.0.", ""): v for k, v in ts_state_dict[0].items() if "blocks.0." in k}
+    block_weights = {k.replace("layers.0.", ""): v for k, v in ts_state_dict[0].items() if "layers.0." in k}
 
     actual_output = run_transformer_block(
         d_model=d_model,
@@ -177,7 +177,7 @@ def test_transformer_block(numpy_snapshot, ts_state_dict, in_embeddings, d_model
 
 def test_rmsnorm(numpy_snapshot, ts_state_dict, in_embeddings):
     state_dict, _ = ts_state_dict
-    reference_weights = state_dict["blocks.1.ln1.weight"]
+    reference_weights = state_dict["layers.1.ln1.weight"]
     d_model = reference_weights.shape[0]
 
     actual_output = run_rmsnorm(d_model=d_model, eps=1e-5, weights=reference_weights, in_features=in_embeddings)

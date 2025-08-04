@@ -244,7 +244,7 @@ def _merge_attention_weights(weights: dict[str, Tensor]) -> dict[str, Tensor]:
 
     layer_prefixes = set()
     for key in list(weights.keys()):
-        if key.startswith("blocks.") and key.endswith(".attn.q_proj.weight"):
+        if key.startswith("layers.") and key.endswith(".attn.q_proj.weight"):
             layer_prefix = key.rsplit(".attn.q_proj.weight", 1)[0]
             layer_prefixes.add(layer_prefix)
 
@@ -356,7 +356,7 @@ def run_transformer_lm(
         vocab_size (int): The number of unique items in the output vocabulary to be predicted.
         context_length (int): The maximum number of tokens to process at once.
         d_model (int): The dimensionality of the model embeddings and sublayer outputs.
-        num_layers (int): The number of Transformer blocks to use.
+        num_layers (int): The number of Transformer layers to use.
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
@@ -367,38 +367,38 @@ def run_transformer_lm(
             The keys of this dictionary are:
             - `token_embeddings.weight`
                 Token embedding matrix. Shape is (vocab_size, d_model).
-            - `blocks.{num_layers}.attn.q_proj.weight`
+            - `layers.{num_layers}.attn.q_proj.weight`
                 The query projections for all `num_heads` attention heads.
                 Shape is (num_heads * (d_model / num_heads), d_model).
                 The rows are ordered by matrices of shape (num_heads, d_k),
                 so `attn.q_proj.weight == torch.cat([q_heads.0.weight, ..., q_heads.N.weight], dim=0)`.
-            - `blocks.{num_layers}.attn.k_proj.weight`
+            - `layers.{num_layers}.attn.k_proj.weight`
                 The key projections for all `num_heads` attention heads.
                 Shape is (num_heads * (d_model / num_heads), d_model).
                 The rows are ordered by matrices of shape (num_heads, d_k),
                 so `attn.k_proj.weight == torch.cat([k_heads.0.weight, ..., k_heads.N.weight], dim=0)`.
-            - `blocks.{num_layers}.attn.v_proj.weight`
+            - `layers.{num_layers}.attn.v_proj.weight`
                 The value projections for all `num_heads` attention heads.
                 Shape is (num_heads * (d_model / num_heads), d_model).
                 The rows are ordered by matrices of shape (num_heads, d_v),
                 so `attn.v_proj.weight == torch.cat([v_heads.0.weight, ..., v_heads.N.weight], dim=0)`.
-            - `blocks.{num_layers}.attn.output_proj.weight`
+            - `layers.{num_layers}.attn.output_proj.weight`
                 Weight of the multi-head self-attention output projection
                 Shape is ((d_model / num_heads) * num_heads, d_model).
-            - `blocks.{num_layers}.ln1.weight`
+            - `layers.{num_layers}.ln1.weight`
                 Weights of affine transform for the first RMSNorm
                 applied in the transformer block.
                 Shape is (d_model,).
-            - `blocks.{num_layers}.ffn.w1.weight`
+            - `layers.{num_layers}.ffn.w1.weight`
                 Weight of the first linear transformation in the FFN.
                 Shape is (d_model, d_ff).
-            - `blocks.{num_layers}.ffn.w2.weight`
+            - `layers.{num_layers}.ffn.w2.weight`
                 Weight of the second linear transformation in the FFN.
                 Shape is (d_ff, d_model).
-            - `blocks.{num_layers}.ffn.w3.weight`
+            - `layers.{num_layers}.ffn.w3.weight`
                 Weight of the third linear transformation in the FFN.
                 Shape is (d_model, d_ff).
-            - `blocks.{num_layers}.ln2.weight`
+            - `layers.{num_layers}.ln2.weight`
                 Weights of affine transform for the second RMSNorm
                 applied in the transformer block.
                 Shape is (d_model,).

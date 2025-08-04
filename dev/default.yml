@@ -39,6 +39,7 @@ optimizer:
 # e.g. 64 * 20_000 * 256 = 327,680,000
 # e.g. 128 * 10_000 * 256 = 327,680,000
 training:
+  use_compile: True
   grad_accum_steps: 1
   batch_size: 128
   max_steps: 10_000

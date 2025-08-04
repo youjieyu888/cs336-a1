@@ -23,7 +23,7 @@ def decode(
     config: Config,
     tokenizer: Tokenizer,
     prompts: list[str],
-    max_new_tokens: int = 32,
+    max_new_tokens: int = 128,
     temperature: float = 0.7,
     top_p: float = 0.9
 ) -> list[str]:
@@ -38,13 +38,13 @@ def decode(
     input_ids = torch.full((batch_size, window_len), pad_token_id, dtype=torch.long, device=device)
     attention_mask = torch.zeros((batch_size, window_len), dtype=torch.bool, device=device)
     for i,tokens in enumerate(batch_tokens):
-        input_ids[i, :len(tokens)] = tokens
+        input_ids[i, :len(tokens)] = torch.tensor(tokens)
         attention_mask[i, :len(tokens)] = 1
     t=time.time()
     kv_cache = [
-        (torch.empty(config.model.batch, config.model.num_heads, config.model.max_seq_len,
+        (torch.empty(batch_size, config.model.num_heads, config.model.max_seq_len,
                      config.model.d_model // config.model.num_heads, device=device, dtype=torch.bfloat16),
-         torch.empty(config.model.batch, config.model.num_heads, config.model.max_seq_len,
+         torch.empty(batch_size, config.model.num_heads, config.model.max_seq_len,
                      config.model.d_model // config.model.num_heads, device=device, dtype=torch.bfloat16))
         for i in range(config.model.num_layers)
     ]
@@ -100,5 +100,5 @@ if __name__ == "__main__":
     config = Config(load_config())
     model = TransformerLm(**config.model, device="cuda", dtype=torch.bfloat16)
     load_checkpoint(MODEL_CKPT, model)
-    print(decode(model, config, tokenizer, ["The bird"])[0])
     breakpoint()
+    print(decode(model, config, tokenizer, ["The"])[0])

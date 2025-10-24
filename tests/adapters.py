@@ -13,7 +13,7 @@ import numpy.typing as npt
 import numpy as np
 
 from dev.dataloader import get_batch
-from dev.layers import Linear, Embedding, RMS, SwiGlu, RoPE, softmax, Attn, Block, TransformerLm
+from dev.serving_model import Linear, Embedding, RMS, SwiGlu, RoPE, softmax, Attn, Block, TransformerLm
 from jaxtyping import Float, Int
 from torch import Tensor
 import torch

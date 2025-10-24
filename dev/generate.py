@@ -4,12 +4,12 @@ import time
 import torch
 
 from dev.launch import Config, load_config
-from dev.layers import TransformerLm
+from dev.serving_model import TransformerLm
 from dev.tokenizer import Tokenizer
 from dev.training import load_checkpoint
 from tests.adapters import get_tokenizer
 
-MODEL_CKPT = "data/runs/run-1756624406/checkpoints/latest.pt"
+MODEL_CKPT = "data/runs/run-1757468131/checkpoints/latest.pt"
 TOKENIZER = 'owt_tokenizer.pkl'
 
 def tokenizer_from_file(path: str)->Tokenizer:
@@ -100,5 +100,5 @@ if __name__ == "__main__":
     config = Config(load_config())
     model = TransformerLm(**config.model, device="cuda", dtype=torch.bfloat16)
     load_checkpoint(MODEL_CKPT, model)
-    breakpoint()
-    print(decode(model, config, tokenizer, ["The"])[0])
+    # breakpoint()
+    print(decode(model, config, tokenizer, ["The", "what the fuck"]))

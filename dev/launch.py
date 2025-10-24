@@ -270,6 +270,7 @@ def train(config: Config):
             "norm": f"{norm:.2f}",
             "tok/s": f"{int(tokens_per_sec):,}",
             "dt": f"{dt_ms:.2f}ms",
+            "memory": f"{get_peak_memory(device)}MB",
         })
         logger.log_metrics({
             "train/loss": train_loss,
